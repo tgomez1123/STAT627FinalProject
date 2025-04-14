@@ -1,0 +1,120 @@
+---
+title: "Project_STAT627"
+author: "Thaina Gomez"
+date: "4/14/2025"
+output: html_document
+---
+
+```{r}
+# Load packages
+library(tidyverse)
+library(caret)
+library(MASS)
+library(car)
+library(ggplot2)
+library(broom)
+library(dplyr)
+
+# Read the data
+data <- read_csv("diabetes_prediction_dataset.csv")
+```
+```{r}
+# Convert categorical variables to factors
+data$gender <- as.factor(data$gender)
+data$hypertension <- as.factor(data$hypertension)
+data$heart_disease <- as.factor(data$heart_disease)
+data$smoking_history <- as.factor(data$smoking_history)
+```
+```{r}
+# Histogram of HbA1c
+ggplot(data, aes(HbA1c_level)) +
+  geom_histogram(binwidth = 0.2, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of HbA1c Levels", x = "HbA1c", y = "Count") +
+  theme_minimal()
+```
+```{r}
+# Correlation Heatmap
+numeric_vars <- dplyr::select(data, age, bmi, blood_glucose_level, HbA1c_level)
+
+
+corr_matrix <- cor(numeric_vars, use = 'complete.obs')
+print(corr_matrix)
+```
+```{r}
+# Full model
+model_full <- lm(HbA1c_level ~ age + bmi + blood_glucose_level + smoking_history + hypertension + heart_disease, data = data)
+
+# Stepwise selection
+model_step <- stepAIC(model_full, direction = "both")
+
+# Summary
+summary(model_step)
+```
+```{r}
+# Tidy model and relabel terms
+model_tidy <- tidy(model_step, conf.int = TRUE)
+
+# Create a relabeling vector
+term_labels <- c(
+  "age" = "Age",
+  "bmi" = "BMI",
+  "blood_glucose_level" = "Blood Glucose",
+  "heart_disease1" = "Heart Disease (Yes)",
+  "hypertension1" = "Hypertension (Yes)",
+  "smoking_historynever" = "Smoking: Never",
+  "smoking_historyformer" = "Smoking: Former",
+  "smoking_historycurrent" = "Smoking: Current",
+  "smoking_historyever" = "Smoking: Ever",
+  "smoking_historynot current" = "Smoking: Not Current",
+  "smoking_historyNo Info" = "Smoking: No Info"
+)
+
+# Apply relabeling and remove intercept
+model_tidy <- model_tidy %>%
+  filter(term != "(Intercept)") %>%
+  mutate(term_label = term_labels[term])
+
+# Plot
+ggplot(model_tidy, aes(x = reorder(term_label, estimate), y = estimate)) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Key Predictors of HbA1c Levels",
+    subtitle = "Heart disease and hypertension show the strongest positive effect",
+    x = "Predictor",
+    y = "Coefficient Estimate"
+  )
+
+```
+```{r}
+ggplot(data, aes(x = blood_glucose_level, y = HbA1c_level)) +
+  geom_point(alpha = 0.3, color = "#A93226") +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 1.2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Relationship between Blood Glucose and HbA1c",
+    subtitle = "Higher glucose is associated with higher HbA1c",
+    x = "Blood Glucose Level",
+    y = "HbA1c Level",
+    caption = "Adjusted R² = 0.04 | MSE = 1.10 (10-fold CV)"
+  )
+```
+```{r}
+par(mfrow = c(2, 2))
+plot(model_step)
+```
+```{r}
+set.seed(123)
+cv_results <- train(HbA1c_level ~ age + bmi + blood_glucose_level + smoking_history + hypertension + heart_disease,
+                    data = data,
+                    method = "lm",
+                    trControl = trainControl(method = "cv", number = 10))
+print(cv_results$results)
+
+```
+
+
+
+
