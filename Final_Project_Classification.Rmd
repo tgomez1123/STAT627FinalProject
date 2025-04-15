@@ -1,0 +1,437 @@
+---
+title: "Final Project-Classification SML"
+author: "Maxwell Miller-Golub"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load data}
+library(readr)
+library(caret)
+library(pROC)
+library(ggplot2)
+library(dplyr)
+library(randomForest)
+library(mlbench)
+library(class)
+library(MASS)
+library(glmnet)
+
+diabetes_prediction_dataset <- read_csv("diabetes_prediction_dataset.csv")
+
+view(diabetes_prediction_dataset)
+diabetes_prediction_dataset
+```
+
+```{r factorize_variables}
+
+diabetes_prediction_dataset <- diabetes_prediction_dataset %>% 
+  mutate(gender = factor(gender),
+         hypertension = factor(hypertension,
+                               levels = c("0", "1"),
+                               labels = c("No", "Yes")),
+         heart_disease = factor(heart_disease,
+                                levels = c("0", "1"),
+                                labels = c("No", "Yes")),
+         smoking_history = as.factor(smoking_history),
+         diabetes = factor(diabetes,
+                           levels = c("0", "1"),
+                           labels = c("No", "Yes")))
+
+diabetes_prediction_dataset
+```
+
+```{r model_tasks}
+
+#classification models:
+# 1. logistic regression
+# 2. k-nearest neighbors (KNN)
+# 3. linear discriminant analysis (LDA/QDA)
+# 4. Random Forest 
+# 5. Ridge/Lasso Logistic Regression
+
+# Metrics
+# Cross-validation
+# Model utility will be evaluated using accuracy, precision, recall, F1-score
+# Analysis of misclassification costs (National Institutes of Health [NIH], 2012, 2017, 2023).
+```
+
+```{r setup}
+set.seed(123)
+
+data <- diabetes_prediction_dataset %>% 
+  filter(complete.cases(.))
+
+#consider fixing train test split for cv
+
+# Split data into 90% training and 10% testing
+test_index <- createDataPartition(data$diabetes, p = 0.1, list = FALSE)
+train_data <- data[-test_index, ]
+test_data <- data[test_index, ]
+
+# Configure 10-fold cross-validation
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  #savePredictions = "final"
+)
+
+# Initialize results dataframe
+results <- data.frame(Model=character(),
+                      Accuracy=double(),
+                      Precision=double(),
+                      Recall=double(),
+                      F1=double(),
+                      AUC=double(),
+                      stringsAsFactors=FALSE,
+                      `KNeighbors`=double(),
+                      Best_MTry = double())
+
+# Function to calculate metrics
+calculate_metrics <- function(predictions, probs, actual) {
+  cm <- confusionMatrix(predictions, actual)
+  auc <- auc(actual, probs)
+  data.frame(
+    Accuracy = cm$overall['Accuracy'],
+    Precision = cm$byClass['Precision'],
+    Recall = cm$byClass['Recall'],
+    F1 = cm$byClass['F1'],
+    AUC = auc
+  )
+}
+```
+
+```{r log_regression}
+
+# Train logistic regression model
+logit_model <- train(
+  diabetes ~ .,
+  data = train_data,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl,
+  metric = "ROC"
+)
+
+# Predict on test set
+test_probs_log <- predict(logit_model, test_data, type = "prob")[, "Yes"]
+test_pred_log <- ifelse(test_probs_log > 0.5, "Yes", "No") %>% factor(levels = c("No", "Yes"))
+
+# Calculate metrics
+cm_log <- confusionMatrix(test_pred, test_data$diabetes, positive = "Yes")
+auc_log <- roc(test_data$diabetes, test_probs)$auc
+
+metrics_log <- data.frame(
+  Model="Logistic Regression",
+  Accuracy = cm_log$overall["Accuracy"],
+  Precision = cm_log$byClass["Precision"],
+  Recall = cm_log$byClass["Recall"],
+  F1 = cm_log$byClass["F1"],
+  AUC = auc_log,
+  KNeighbors = "N/A",
+  Best_MTry = "N/A"
+)
+
+roc_obj_log <- roc(response = test_data$diabetes,
+               predictor = test_probs,
+               levels = c("No", "Yes"))
+
+# Plot the ROC curve
+plot(roc_obj_log,
+     main = "ROC Curve for Logistic Regression",
+     xlab = "False Positive Rate (1 - Specificity)",
+     ylab = "True Positive Rate (Sensitivity)",
+     col = "blue",
+     lwd = 2)
+
+# Add AUC annotation to the plot
+auc_value_log <- auc_log(roc_obj_log)
+text(0.6, 0.2, paste("AUC =", round(auc_value_log, 3)), col = "red", cex = 1.2)
+
+# Add diagonal reference line (random classifier)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+```
+
+```{r knn}
+
+# Define KNN tuning grid (test k from 1 to 20, odd numbers only)
+k_grid <- data.frame(k = seq(1, 30, by = 2))
+
+# Train KNN model with cross-validation
+knn_model <- train(
+  diabetes ~ .,
+  data = train_data,
+  method = "knn",
+  preProcess = c("center", "scale"),
+  tuneGrid = k_grid,
+  trControl = ctrl,
+  metric = "ROC"
+)
+
+# View cross-validation results
+print(knn_model)
+plot(knn_model, main = "KNN Performance Across Different k Values")
+
+# Make predictions on test set
+test_pred_knn <- predict(knn_model, newdata = test_data)
+test_probs_knn <- predict(knn_model, newdata = test_data, type = "prob")[, "Yes"]
+
+# Calculate metrics
+cm_knn <- confusionMatrix(test_pred_knn, test_data$diabetes, positive = "Yes")
+auc_knn <- roc(test_data$diabetes, test_probs_knn)$auc
+
+# Create results table
+metrics_knn <- data.frame(
+  Model="KNN",
+  Accuracy = cm_knn$overall["Accuracy"],
+  Precision = cm_knn$byClass["Precision"],
+  Recall = cm_knn$byClass["Recall"],
+  F1 = cm_knn$byClass["F1"],
+  AUC = auc_knn,
+  KNeighbors = knn_model$bestTune$k,
+  Best_MTry = "N/A"
+)
+
+
+# Print formatted results
+print("Final Test Set Metrics:")
+print(results_knn)
+
+# Plot ROC curve
+roc_curve_knn <- roc(test_data$diabetes, test_probs)
+plot(roc_curve_knn, main = "ROC Curve for KNN Model", col = "blue", lwd = 2)
+text(0.6, 0.2, paste("AUC =", round(auc, 3)), col = "red", cex = 1.2)
+
+```
+
+```{r lda}
+
+# Train LDA model
+lda_model <- train(diabetes ~ .,
+                  data = train_data,
+                  method = "lda",
+                  preProcess = c("center", "scale"),
+                  trControl = ctrl,
+                  metric = "ROC")
+
+# Make predictions on test set
+test_pred_lda <- predict(lda_model, newdata = test_data)
+test_probs_lda <- predict(lda_model, newdata = test_data, type = "prob")[, "Yes"]
+
+# Calculate metrics
+cm_lda <- confusionMatrix(test_pred_lda, test_data$diabetes, positive = "Yes")
+auc_lda <- roc(test_data$diabetes, test_probs_lda)$auc
+
+# Create results table
+metrics_lda <- data.frame(
+  Model="LDA",
+  Accuracy = cm_lda$overall["Accuracy"],
+  Precision = cm_lda$byClass["Precision"],
+  Recall = cm_lda$byClass["Recall"],
+  F1 = cm_lda$byClass["F1"],
+  AUC = auc_lda,
+  KNeighbors = "N/A",
+  Best_MTry = "N/A"
+)
+
+# Train QDA model
+#qda_model <- train(diabetes ~ .,
+#                  data = train_data,
+#                  method = "qda",
+#                  preProcess = c("center", "scale"),
+#                  trControl = ctrl,
+#                  metric = "ROC")
+
+# Evaluate models on test set
+#test_metrics <- function(model, test_data) {
+#  probs <- predict(model, test_data, type = "prob")[, "pos"]
+#  pred <- predict(model, test_data)
+#  cm <- confusionMatrix(pred, test_data$diabetes, positive = "pos")
+#  auc <- roc(test_data$diabetes, probs)$auc
+  
+#  data.frame(
+#    Model = model,
+#    Accuracy = cm$overall["Accuracy"],
+#    Precision = cm$byClass["Precision"],
+#    Recall = cm$byClass["Recall"],
+#    F1 = cm$byClass["F1"],
+#    AUC = auc
+#  )
+#}
+
+# Plot ROC curve
+roc_curve_lda <- roc(test_data$diabetes, test_probs_lda)
+plot(roc_curve_lda, main = "ROC Curve for LDA Model", col = "blue", lwd = 2)
+text(0.6, 0.2, paste("AUC =", round(auc, 3)), col = "red", cex = 1.2)
+
+# Compare model performance
+results <- rbind(metrics_log, metrics_knn, metrics_lda)
+
+
+
+```
+
+```{r rf}
+
+# Train Random Forest with hyperparameter tuning
+rf_model <- train(
+  diabetes ~ .,
+  data = train_data,
+  method = "rf",
+  trControl = ctrl,
+  metric = "ROC",
+  tuneGrid = data.frame(mtry = c(2, 3, 4)),  # Test different mtry values
+  ntree = 500  # Number of trees
+)
+
+# View cross-validation results
+print(rf_model)
+plot(rf_model, main = "Random Forest Performance by mtry")
+
+# Evaluate on test set
+test_pred_rf <- predict(rf_model, test_data)
+test_probs_rf <- predict(rf_model, newdata = test_data, type = "prob")[, "Yes"]
+
+# Calculate metrics
+cm_rf <- confusionMatrix(test_pred_rf, test_data$diabetes, positive = "Yes")
+auc_rf <- roc(test_data$diabetes, test_probs)$auc
+
+# Create results table
+metrics_rf <- data.frame(
+  Model = "Random Forest",
+  Accuracy = cm_rf$overall["Accuracy"],
+  Precision = cm_rf$byClass["Precision"],
+  Recall = cm_rf$byClass["Recall"],
+  F1 = cm_rf$byClass["F1"],
+  AUC = auc_rf,
+  KNeighbors = "N/A",
+  Best_MTry = 4
+)
+
+# Print results
+print(metrics_rf)
+results <- rbind(metrics_log, metrics_knn, metrics_lda, metrics_rf)
+results
+
+# Plot ROC curve
+roc_curve_rf <- roc(test_data$diabetes, test_probs_rf)
+plot(roc_curve_rf, main = "Random Forest ROC Curve", col = "blue", lwd = 2)
+text(0.6, 0.2, paste("AUC =", round(auc, 3)), col = "red", cex = 1.2)
+
+# Variable importance plot
+varImpPlot(rf_model$finalModel, main = "Variable Importance")
+
+```
+
+```{r lasso_ridge_elastic}
+
+# Convert data to matrix format for glmnet
+x <- model.matrix(diabetes ~ ., data)[,-1]
+y <- data$diabetes
+
+x_train <- x[test_index,]
+x_test <- x[-test_index,]
+y_train <- y[test_index]
+y_test <- y[-test_index]
+
+# Function to calculate metrics
+get_metrics <- function(model, x_test, y_test) {
+  probs <- predict(model, newx = x_test, type = "response")
+  pred <- ifelse(probs > 0.5, "Yes", "No") %>% factor(levels = c("No", "Yes"))
+  
+  cm <- confusionMatrix(pred, y_test, positive = "pos")
+  auc <- roc(y_test, probs[,1])$auc
+  
+  data.frame(
+    Model = model,
+    Accuracy = cm$overall["Accuracy"],
+    Precision = cm$byClass["Precision"],
+    Recall = cm$byClass["Recall"],
+    F1 = cm$byClass["F1"],
+    AUC = auc,
+    KNeighbors = "N/A",
+    Best_MTry = "N/A"
+  )
+}
+
+# 1. Lasso Regression (alpha = 1)
+lasso_cv <- cv.glmnet(x_train, y_train, alpha = 1, family = "binomial", type.measure = "auc")
+lasso_model <- glmnet(x_train, y_train, alpha = 1, family = "binomial", lambda = lasso_cv$lambda.min)
+lasso_model
+
+
+test_pred_lasso <- predict(lasso_model, test_data)
+test_probs_lasso <- predict(lasso_model, newdata = test_data, type = "prob")[, "Yes"]
+
+# Calculate metrics
+cm_lasso <- confusionMatrix(test_pred_lasso, test_data$diabetes, positive = "Yes")
+auc_lasso <- roc(test_data$diabetes, test_probs)$auc
+
+# Create results table
+metrics_lasso <- data.frame(
+  Model = "Random Forest",
+  Accuracy = cm_lasso$overall["Accuracy"],
+  Precision = cm_lasso$byClass["Precision"],
+  Recall = cm_lasso$byClass["Recall"],
+  F1 = cm_lasso$byClass["F1"],
+  AUC = auc_lasso,
+  KNeighbors = "N/A",
+  Best_MTry = 4
+)
+
+metrics_lasso
+#lasso_metrics <- get_metrics(lasso_model, x_test, y_test)
+
+# 2. Ridge Regression (alpha = 0)
+ridge_cv <- cv.glmnet(x_train, y_train, alpha = 0, family = "binomial", type.measure = "auc")
+ridge_model <- glmnet(x_train, y_train, alpha = 0, family = "binomial", lambda = ridge_cv$lambda.min)
+#ridge_metrics <- get_metrics(ridge_model, x_test, y_test)
+
+# 3. Elastic Net (automatic alpha tuning)
+elastic_model <- train(
+  x = x_train,
+  y = y_train,
+  method = "glmnet",
+  trControl = ctrl,
+  metric = "ROC",
+  tuneLength = 10,
+  family = "binomial"
+)
+
+elastic_metrics <- data.frame(
+  Model = "Elastic",
+  Accuracy = mean(elastic_model$pred$obs == elastic_model$pred$pred),
+  Precision = posPredValue(elastic_model$pred$pred, elastic_model$pred$obs, positive = "Yes"),
+  Recall = sensitivity(elastic_model$pred$pred, elastic_model$pred$obs, positive = "Yes"),
+  F1 = (2 * Precision * Recall) / (Precision + Recall),
+  AUC = roc(elastic_model$pred$obs, elastic_model$pred$pos)$auc,
+  KNeighbors = "N/A",
+  Best_MTry = "N/A"
+)
+
+# Combine results
+results <- rbind(
+  cbind(Model = "Lasso", lasso_metrics),
+  cbind(Model = "Ridge", ridge_metrics),
+  cbind(Model = "Elastic Net", elastic_metrics)
+)
+
+# Print formatted results
+print("Model Performance Comparison:")
+print(results)
+
+# Plot regularization paths
+par(mfrow = c(2,2))
+plot(lasso_cv, main = "Lasso Regression")
+plot(ridge_cv, main = "Ridge Regression")
+plot(elastic_model$finalModel, xvar = "lambda", main = "Elastic Net Path")
+plot(varImp(elastic_model), top = 5, main = "Elastic Net Feature Importance")
+
+```
+
