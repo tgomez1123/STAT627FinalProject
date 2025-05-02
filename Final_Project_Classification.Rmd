@@ -39,8 +39,7 @@ Classification models:
 
 Metrics
  Cross-validation
- Model utility will be evaluated using accuracy, precision, recall, F1-score
- Analysis of misclassification costs (National Institutes of Health [NIH], 2012, 2017, 2023).
+ Model utility will be evaluated using accuracy, precision, recall, F1-score, AUC
  
 
 ```{r preprocess, cache=TRUE}
@@ -449,12 +448,18 @@ results %>%
 
 cm_df <- as.data.frame(cm_rf$table)
 
-# Plot heatmap
 ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
   geom_tile(color = "white") +
-  geom_text(aes(label = Freq), size = 5, color = "darkred") +
+  geom_label(aes(label = Freq),
+             size = 8,
+             color = "darkred",
+             fill = "white",
+             label.size = 0) +
   scale_fill_gradient(low = "lightblue", high = "darkblue") +
-  labs(title = "Confusion Matrix of Diabetes Prediction", x = "Actual Diagnosis", y = "Predicted Diagnosis") +
+  scale_y_discrete(limits = rev(levels(cm_df$Prediction))) +  # Flip Y-axis
+  labs(title = "Random Forest Confusion Matrix of Diabetes Prediction",
+       x = "Actual Diagnosis",
+       y = "Predicted Diagnosis") +
   theme_minimal()
 ```
 
