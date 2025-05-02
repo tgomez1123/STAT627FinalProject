@@ -1,0 +1,166 @@
+
+---
+title: "STAT 627 Final Project: Enhanced Regression Modeling"
+author: "Thaina Gomez"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(tidyverse)
+library(caret)
+library(car)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(pdp)
+```
+
+
+```{r}
+data <- read_csv("diabetes_prediction_dataset.csv")
+
+# Convert appropriate variables to factors
+data <- data %>%
+  mutate(across(c(gender, hypertension, heart_disease, smoking_history), as.factor))
+```
+## Histogram of HbA1c
+```{r}
+ggplot(data, aes(HbA1c_level)) +
+  geom_histogram(binwidth = 0.2, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of HbA1c Levels", x = "HbA1c", y = "Count") +
+  theme_minimal()
+```
+## Correlation Matrix
+```{r}
+numeric_vars <- dplyr::select(data, age, bmi, blood_glucose_level, HbA1c_level)
+corr_matrix <- cor(numeric_vars, use = "complete.obs")
+print(corr_matrix)
+```
+##Age × BMI interaction
+#Trends in HbA1c levels relative to BMI differ among various age groups, with stronger positive associations found in older adults. This observation supports the inclusion of an age × BMI interaction term in the regression model. Incorporating this interaction term allows the model to account for the potential modification effect of age. Boye et al. (2021) demonstrated that the relationship between BMI and HbA1c varied by age group, with the strongest association occurring in adults aged 18 to 44, further confirming age as an effect modifier.
+# Source: Boye KS, Lage MJ, Shinde S, Thieu V, Bae JP. (2021). Trends in HbA1c and Body Mass Index Among Individuals with Type 2 Diabetes.
+# Diabetes Ther. 12(7), 2077–2087. doi:10.1007/s13300-021-01084-0
+```{r}
+data <- data %>% filter(age >= 18)
+
+# Create age groups before scaling
+data <- data %>%
+  mutate(age_group = cut(age,
+                         breaks = c(18, 30, 50, 70, Inf),
+                         labels = c("18–30", "31–50", "51–70", "71+")))
+
+# Now scale (if needed)
+train_scaled <- data %>%
+  mutate(across(c(age, bmi, blood_glucose_level), scale)) %>%
+  filter(!is.na(age_group))
+
+# Plot
+ggplot(train_scaled, aes(x = bmi, y = HbA1c_level, color = age_group)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "loess", se = FALSE) +
+  labs(title = "HbA1c vs BMI by Age Group", color = "Age Group")
+```
+##Polynomial term for blood_glucose_level
+#The relationship between blood glucose and HbA1c is known to be non-linear, particularly in the pre-diabetic and diabetic ranges Rohlfing et al. (2002). Including a second-degree polynomial term allows the model to better capture this curvilinear pattern and improve predictive accuracy.
+# Source: Rohlfing, C. L., Wiedmeyer, H.-M., Little, R. R., England, J. D., Tennill, A., & Goldstein, D. E. (2002). Defining the relationship between plasma glucose and HbA1c: Analysis of glucose profiles and HbA1c in the Diabetes Control and Complications Trial. Diabetes Care, 25(2), 275–278. https://doi.org/10.2337/diacare.25.2.275
+```{r}
+crPlots(lm(HbA1c_level ~ blood_glucose_level, data = train_scaled))
+```
+
+```{r}
+set.seed(123)
+train_index <- createDataPartition(data$HbA1c_level, p = 0.8, list = FALSE)
+train_data <- data[train_index, ]
+test_data  <- data[-train_index, ]
+preProc <- preProcess(train_data, method = c("center", "scale"))
+train_scaled <- predict(preProc, train_data)
+test_scaled <- predict(preProc, test_data)
+train_control <- trainControl(method = "cv", number = 10)
+```
+## Linear Regression with Interactions
+#This model includes an interaction term between age and BMI, as well as a second-degree polynomial term for blood glucose level. We included interaction terms because a scatterplot of HbA1c against BMI, colored by age, showed different slopes for different age groups. This indicates that BMI's effect on HbA1c may vary with age. Furthermore, a component and residual plot showed that the relationship with blood glucose level is non-linear, which supports using a polynomial term. Both the interaction and polynomial terms were statistically significant (p < 0.001), and the variance inflation factors (VIFs) were below 2, confirming there is no serious multicollinearity.
+```{r}
+set.seed(123)
+lm_cv <- train(
+  HbA1c_level ~ age * bmi + poly(blood_glucose_level, 2) + gender + hypertension + heart_disease + smoking_history,
+  data = train_scaled,
+  method = "lm",
+  trControl = train_control
+)
+lm_cv$results
+```
+
+
+```{r}
+lm_model <- lm(HbA1c_level ~ age * bmi + poly(blood_glucose_level, 2) + gender + hypertension + heart_disease + smoking_history,
+               data = train_scaled)
+summary(lm_model)
+vif(lm_model)
+
+par(mfrow = c(2, 2))
+plot(lm_model)
+```
+
+## Regression Tree
+#The diagnostic plots from the linear model showed that the residuals had some curvature and revealed possible interactions that were not manually included. We used Regression Trees to automatically find non-linear splits and higher-order interactions. This approach made the results easier to understand and helped us pinpoint important decision thresholds, like glucose cutoffs.
+
+```{r}
+# Fit and plot the tree
+tree_model <- rpart(HbA1c_level ~ age + bmi + blood_glucose_level + gender + hypertension + heart_disease + smoking_history,
+                    data = train_scaled, method = "anova")
+
+tree_pred <- predict(tree_model, test_scaled)
+tree_rmse <- sqrt(mean((tree_pred - test_scaled$HbA1c_level)^2))
+
+rpart.plot(tree_model, main = paste("Regression Tree\nTest RMSE:", round(tree_rmse, 4)))
+```
+
+## Lasso and Ridge Regression
+#We used these models for regularization and feature selection. We chose Lasso because it can reduce irrelevant coefficients to zero, which is helpful for predictors like smoking_history that have many categories. We included Ridge to compare how both models handle shrinkage when we assume all variables are important. We tuned both models using cross-validation to find the best lambda for improving accuracy and preventing overfitting.
+
+```{r}
+train_scaled <- train_scaled %>% drop_na()
+test_scaled  <- test_scaled %>% drop_na()
+x_train <- model.matrix(HbA1c_level ~ ., train_scaled)[, -1]
+y_train <- train_scaled$HbA1c_level
+x_test <- model.matrix(HbA1c_level ~ ., test_scaled)[, -1]
+y_test <- test_scaled$HbA1c_level
+
+# Lasso
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1, keep = TRUE)
+plot(log(lasso_model$lambda), lasso_model$cvm, type = "l",
+     xlab = "log(Lambda)", ylab = "Mean CV Error", main = "Lasso CV Error Path")
+lasso_pred <- predict(lasso_model, s = "lambda.min", newx = x_test)
+lasso_rmse <- sqrt(mean((lasso_pred - y_test)^2))
+
+# Ridge
+ridge_model <- cv.glmnet(x_train, y_train, alpha = 0)
+ridge_pred <- predict(ridge_model, s = "lambda.min", newx = x_test)
+ridge_rmse <- sqrt(mean((ridge_pred - y_test)^2))
+
+# Ridge Coefficient Paths
+alphas <- 10^seq(10, -2, length = 100)
+ridge_coefs <- sapply(alphas, function(a) {
+  fit <- glmnet(x_train, y_train, alpha = 0, lambda = a)
+  as.vector(coef(fit))[-1]
+})
+matplot(log10(alphas), t(ridge_coefs), type = "l", lty = 1,
+        xlab = "log10(Lambda)", ylab = "Coefficient", main = "Ridge Coefficient Paths")
+```
+
+## Compare All Models
+#Linear Regression showed a strong baseline with easy-to-understand coefficients, but its higher RMSE suggests it struggles with non-linear patterns and interactions beyond the age × BMI term.  Lasso & Ridge Regression models had the lowest RMSE (about 0.905), making them the best options. Lasso is particularly helpful for selecting important features. Both are recommended depending on the analysis goal. 
+
+```{r}
+lm_pred <- predict(lm_model, test_scaled)
+lm_rmse <- sqrt(mean((lm_pred - test_scaled$HbA1c_level)^2))
+
+rmse_results <- tibble(
+  Model = c("Linear (w/ interactions)", "Tree", "Lasso", "Ridge"),
+  RMSE = c(lm_rmse, tree_rmse, lasso_rmse, ridge_rmse)
+)
+
+print(rmse_results)
+```
